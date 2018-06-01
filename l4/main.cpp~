@@ -1,0 +1,92 @@
+#include "res.h"
+#include <iostream>
+#include <queue>
+#include <mutex>
+
+std::mutex mtx_queue;					
+std::queue<Report> queue;				// очередь заявок
+int N = 0, M = 0, K = 0;
+
+void inhab_thread()						// рабочие подают заявки
+{
+    Inhab self(K);
+
+    while (self.isResult())
+    {
+        self.operation();
+        std::promise<double> p_time;
+        std::future<double> f_time = p_time.get_future();
+        std::promise<bool> p_result;
+        std::future<bool> f_result = p_result.get_future();
+
+        Report task(p_time, p_result);
+
+        mtx_queue.lock();
+        queue.push(task);
+        mtx_queue.unlock();
+
+        self.wait(f_result, f_time);
+    }
+
+    std::cout << "Inhab \t\t" << --N << "\t" << self.comp << " / " <<
+                                                                self.expired << " = "
+    << self.comp + self.expired << std::endl;
+}
+
+
+void official_thread()					// ченовники берут заявки
+{
+    Official self(K);
+
+    while (self.isResult())
+    {
+        mtx_queue.lock();
+
+        if (!queue.empty())
+        {
+            Report task = queue.front();
+            queue.pop();
+            mtx_queue.unlock();
+
+            self.work(task);
+
+            mtx_queue.lock();
+        }
+        mtx_queue.unlock();
+        std::this_thread::sleep_for(std::chrono::seconds(std::rand() % 10));
+    }
+
+    std::cout << "Official\t" << --M << "\t" << self.com << " / " << self.expired << " = "
+    << self.com + self.expired << std::endl;
+}
+
+int main()
+{
+    int Q = 0;
+
+    std::cout << "Enter N, M, Q, K: " << std::endl;
+    std::cin >> N >> M >> Q >> K;
+
+    std::deque<std::thread> inhabs, officials;
+
+    for (auto i = 0; i < N; ++i)
+        inhabs.push_back(std::thread(inhab_thread));
+
+    for (auto i = 0; i < M; ++i)
+        officials.push_back(std::thread(official_thread));
+
+    while (inhabs.size())
+    {
+        inhabs.front().join();
+        inhabs.pop_front();
+    }
+
+    while (officials.size())
+    {
+        officials.front().join();
+        officials.pop_front();
+    }
+
+
+    return 0;
+}

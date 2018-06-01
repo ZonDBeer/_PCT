@@ -1,0 +1,283 @@
+#include <iostream>
+#include <string>
+#include <fstream>
+#include <vector>
+#include <deque>
+#include <map>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <algorithm>
+#include <sstream>
+#include <chrono>
+#include <exception>
+#include <signal.h>
+#include <unistd.h>
+#include <ctime>
+
+using namespace std;
+
+mutex                  lock;
+condition_variable     cond_var;
+bool                   ready = false;
+bool                   processed = false;
+static int             counter = 1;										// статистика встречаемости слов
+
+
+void create_pipeline(const string&, const string&);
+void split_pipeline(vector<string>&);
+void lower_pipeline(vector<string>&);
+void stat_pipeline(vector<string>&);
+void sort_pipeline(vector<string>&);
+void split_str(string&);
+void lower_str(string&);
+
+void wait(int sec)
+{
+    clock_t endwait = clock() + sec * CLOCKS_PER_SEC;
+
+    while (clock() < endwait)
+    {
+
+    }
+}
+
+void safe_shotdown(int i)
+{
+    switch (i)
+    {
+        case SIGQUIT:
+            cout << "Обработка SIGQUIT \n";
+            wait(100);
+            break;
+        case SIGINT:
+            kill(getppid(), SIGINT);
+            break;
+        case SIGTERM:
+            kill(getppid(), SIGTERM);
+            break;
+    }
+}
+
+void daemonize()
+{
+    signal(SIGQUIT, safe_shotdown);
+    signal(SIGTERM, safe_shotdown);
+    signal(SIGINT, safe_shotdown);
+}
+
+void split_pipeline(vector<string> &freq)
+{
+    unique_lock<mutex> lk(lock);
+    cond_var.wait(lk, []{return ready;});		// если лямбда выражение возвраает тру то мьютекс разблокируется, стадия завершился
+
+    for (size_t i = 0; i < freq.size(); ++i)
+    {
+        split_str(freq[i]);
+    }
+
+    processed = true;
+    lk.unlock();
+    cond_var.notify_one();									// ожидание сигнала завершения
+}
+
+void split_str(string &str)
+{
+    for (size_t i = 0; i < str.size(); ++i)
+    {
+        if ((str[i] == '.') || (str[i] == ',') || (str[i] == ';') || (str[i] == ':') || (str[i] == '!') || (str[i] == '?'))
+        {
+            str[i] = ' ';
+        }
+    }
+}
+
+void lower_pipeline(vector<string> &freq)
+{
+    unique_lock<mutex> lk(lock);
+    cond_var.wait(lk, []{return ready;});
+
+    for (size_t i = 0; i < freq.size(); ++i)
+    {
+        lower_str(freq[i]);
+    }
+
+    processed = true;
+
+    lk.unlock();
+    cond_var.notify_one();
+}
+
+void lower_str(string &str)
+{
+    for (auto i = 0; i < str.size(); ++i)
+        str[i] = tolower(str[i]);
+}
+
+void sort_pipeline(vector<string> &freq)
+{
+    unique_lock<mutex> lk(lock);
+    cond_var.wait(lk, []{return ready;});
+
+    sort(freq.begin(), freq.end());
+
+    processed = true;
+
+    lk.unlock();
+    cond_var.notify_one();
+}
+
+void create_pipeline(const string &infile, const string &outfile)
+{
+    ifstream in(infile.c_str());
+    ofstream out(outfile.c_str());
+    vector<string> freq;
+
+    while (!in.eof())
+    {
+        string temp;
+        getline(in, temp);
+
+        {
+            unique_lock<mutex> guard(lock);
+            freq.push_back(temp);
+        }
+    }
+
+    thread split(split_pipeline, ref(freq));
+    {
+        unique_lock<mutex>lk(lock);
+        ready = true;
+    }
+    {
+        unique_lock<mutex>lk(lock);
+        cond_var.wait(lk, []{return processed;});
+    }
+
+    thread lower(lower_pipeline, ref(freq));
+
+    {
+        unique_lock<mutex> lk(lock);
+        ready = true;
+    }
+    {
+        unique_lock<mutex> lk(lock);
+        cond_var.wait(lk, []{return processed;});
+    }
+
+    thread sort(sort_pipeline, ref(freq));
+
+    {
+        unique_lock<mutex> lk(lock);
+        ready = true;
+    }
+    {
+        unique_lock<mutex> lk(lock);
+        cond_var.wait(lk, []{return processed;});
+    }
+
+    thread stat(stat_pipeline, ref(freq));
+
+    {
+        unique_lock<mutex> lk(lock);
+        ready = true;
+    }
+    {
+        unique_lock<mutex> lk(lock);
+        cond_var.wait(lk, []{ return processed;});
+    }
+
+    cond_var.notify_all();										// ожидаем все потоки
+
+    split.join();
+    lower.join();
+    sort.join();
+    stat.join();
+
+    for (int i = 0; i < freq.size(); i++)
+    {
+        out << freq[i]<< " ";
+    }
+
+}
+
+void stat_pipeline(vector<string> &freq)
+{
+    unique_lock<mutex> lk(lock);
+    cond_var.wait(lk, []{return ready;});									//  блокирует текущий поток до тех пор пока переменная условия проснулся
+
+
+    map<string, size_t> temp;
+    vector<string>::iterator iter;
+    string word;
+    int j = 0;
+
+    for (auto i = 0; i < freq.size(); ++i)
+    {
+        stringstream ss(freq[i]);																				// парсит предложения на слова и кидает в мап
+
+        while (ss >> word)
+            temp[word]++;
+    }
+
+    cout << "Статисика файла # " << counter << endl;
+
+    map<string, size_t>::iterator i = temp.begin();
+
+    while (i != temp.end())
+    {
+        cout << i->first << " - " << i->second << endl;
+        ++i;
+        ++j;
+
+        if (j == 10)
+            break;
+    }
+
+    counter++;
+
+    processed = true;
+
+    lk.unlock();
+    cond_var.notify_one();
+
+}
+
+int main()
+{
+    int n;
+    string *infile, *outfile;
+    deque<thread> pool;
+
+    cout << "Введите количетсво файлов: " << endl;
+    cin >> n;
+
+    infile = new string[n];
+
+    cout << "Введите имена входных файлов: " << endl;
+
+    for (int i = 0; i < n; ++i)
+        cin >> infile[i];
+
+    outfile = new string[n];
+
+    cout << "Введите имена выходных файлов: " << endl;
+
+    for (int i = 0; i < n; i++)
+        cin >> outfile[i];
+
+    for (int i = 0; i < n; i++)
+    {
+        pool.push_back(thread(create_pipeline, infile[i], outfile[i]));
+        daemonize();
+        wait(2);
+    }
+
+    while (pool.size())
+    {
+        pool.front().join();
+        pool.pop_front();
+    }
+
+    return 0;
+}
